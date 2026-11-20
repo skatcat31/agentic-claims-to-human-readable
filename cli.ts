@@ -4,6 +4,7 @@
  *   node dist/cli.js list
  *   node dist/cli.js ingest <file|->
  *   node dist/cli.js export <claimId>
+ *   node dist/cli.js raw <claimId>
  */
 
 import * as fs from 'fs';
@@ -23,6 +24,7 @@ function usage(): void {
   console.log('  node dist/cli.js list                 list ingested claims');
   console.log('  node dist/cli.js ingest <file|->      ingest an 837 file (or - for stdin)');
   console.log('  node dist/cli.js export <claimId>     export a claim to static HTML');
+  console.log('  node dist/cli.js raw <claimId>        print the raw 837 text (reconstructed)');
 }
 
 function readStdin(): Promise<string> {
@@ -94,6 +96,22 @@ async function main(): Promise<void> {
     }
     console.log('Exported ' + j.fileName + ' -> ' + j.filePath);
     console.log('View:    ' + BASE + (j.url ?? ''));
+    return;
+  }
+
+  if (cmd === 'raw') {
+    if (!arg) {
+      usage();
+      return;
+    }
+    const r = await fetch(BASE + '/api/claims/' + arg + '/raw');
+    const j = (await r.json()) as { error?: string; raw?: string; segmentCount?: number };
+    if (!r.ok || !j.raw) {
+      console.error('Error:', j.error ?? 'unknown');
+      process.exitCode = 1;
+      return;
+    }
+    console.log(j.raw);
     return;
   }
 

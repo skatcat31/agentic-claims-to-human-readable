@@ -57,6 +57,7 @@ npm start                # build (tsc) + boot the server on :8370
 node dist/cli.js ingest samples/sample-837.txt
 node dist/cli.js list
 node dist/cli.js export <claimId>
+node dist/cli.js raw <claimId>
 
 # open the exported page (also opens in any browser, fully offline)
 #   output/claim-<id>.html
@@ -77,6 +78,7 @@ npm test
 | POST   | `/api/claims`                     | Ingest a claim (raw text or JSON `{claim}`)    |
 | GET    | `/api/claims`                     | List ingested claims                           |
 | GET    | `/api/claims/:id`                 | Claim metadata                                 |
+| GET    | `/api/claims/:id/raw`             | Reconstructed raw 837 text (from the vector DB)|
 | POST   | `/api/claims/:id/export`          | Generate the static HTML (JSON reply)          |
 | GET    | `/files/:name`                    | Serve an exported HTML (lazy-generated)        |
 | GET    | `/api/search?q=&scope=&k=`        | Similarity search over the vector DB (RAG demo)|
@@ -218,7 +220,7 @@ per-claim permissions, and audit.
    | Route | Rule |
    | --- | --- |
    | `GET /api/claims`, `GET /` | forward, then **filter** the list to claims the user may view |
-   | `GET /api/claims/:id` | `canView(user, claimId)`, else **403** |
+   | `GET /api/claims/:id`, `GET /api/claims/:id/raw` | `canView(user, claimId)`, else **403** |
    | `POST\|GET /api/claims/:id/export` | `canView(user, claimId)`, else **403** |
    | `GET /files/claim-<id>.html` | derive `claimId` from the name; `canView(user, claimId)`, else **403** (this also blocks lazy generation for non-viewable claims) |
    | `POST /api/claims` (ingest) | role-gated (e.g. an `ingest` service account / batch role); interactive users denied, or granted visibility only to their own submissions |

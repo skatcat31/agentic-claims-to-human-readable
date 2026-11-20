@@ -9,3 +9,8 @@ One section should display the electronic claim, and the other section should di
 When someone hovers over a field value or name, it should highlight where in the electronic claim that data came from.
 
 When you are finished you should generate a readme explaining the project with an example of what the page looks like and a references section of all external references you accessed
+
+follow up prompts:
+- explain the HIPAA problems with the project and how you could address them
+- explain how to make the application production ready
+- add a new method to retreive the raw claim

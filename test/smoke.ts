@@ -140,6 +140,23 @@ async function main(): Promise<void> {
       ' fields, all keys unique)'
   );
 
+  // 6. Raw-claim reconstruction (what GET /api/claims/:id/raw returns)
+  const rawRebuilt = segs.map((r) => r.text).join('~') + '~';
+  const reparsed = parse837(rawRebuilt);
+  assert.strictEqual(reparsed.segmentCount, 33, 'reconstructed raw must re-parse to 33 segments');
+  assert.deepStrictEqual(
+    reparsed.segments.map((s) => s.id),
+    segments.map((s) => s.id),
+    'segment order must survive the raw round-trip'
+  );
+  console.log(
+    'ok 6 - raw reconstruction (' +
+      reparsed.segmentCount +
+      ' segments, ' +
+      rawRebuilt.length +
+      ' chars)'
+  );
+
   console.log('\nAll smoke tests passed.');
 }
 

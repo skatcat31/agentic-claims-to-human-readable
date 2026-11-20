@@ -10,6 +10,7 @@
  *   POST /api/claims           ingest a claim (raw text or JSON {claim})
  *   GET  /api/claims           list ingested claims
  *   GET  /api/claims/:id       claim metadata
+ *   GET  /api/claims/:id/raw   reconstructed raw 837 text (from the vector DB)
  *   POST|GET /api/claims/:id/export   generate the static HTML (JSON reply)
  *   GET  /files/:name          serve an exported HTML file (lazy-generated)
  *   GET  /api/search?q=&scope=&k=    similarity search (RAG demo)
@@ -174,6 +175,21 @@ function exportClaim(claimId: string): ExportResult | null {
 function getMeta(claimId: string): ClaimMeta | null {
   const rec = store.get(claimId, 'meta', 'META', 0);
   return rec ? (rec.meta as ClaimMeta) : null;
+}
+
+/**
+ * Reconstruct the raw 837 interchange text from the stored segments.
+ *
+ * Segments live in the vector DB as individual `seg` records (text = raw
+ * segment text); joining them with `~` restores a parseable interchange.
+ * The text is normalized by the parser: line breaks became spaces and the
+ * ISA end-of-interchange control marker (`:~` / `>~`) is not preserved
+ * byte-for-byte.
+ */
+function getRawClaim(claimId: string): { raw: string; segmentCount: number } | null {
+  const segs = store.byClaim(claimId, 'seg');
+  if (!segs.length) return null;
+  return { raw: segs.map((r) => r.text).join('~') + '~', segmentCount: segs.length };
 }
 
 // ---------------------------------------------------------------- http ---
@@ -359,6 +375,17 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         url: '/files/' + result.fileName,
         rag: result.stats,
       });
+      return;
+    }
+
+    const rawMatch = p.match(/^\/api\/claims\/([A-Za-z0-9-]+)\/raw$/);
+    if (rawMatch && m === 'GET') {
+      const claim = getRawClaim(rawMatch[1]);
+      if (!claim) {
+        sendJson(res, 404, { error: 'Claim not found: ' + rawMatch[1] });
+        return;
+      }
+      sendJson(res, 200, { claimId: rawMatch[1], raw: claim.raw, segmentCount: claim.segmentCount });
       return;
     }
 
