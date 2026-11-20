@@ -9,6 +9,10 @@ baked in — no CDN, no network) that render the claim in a human-readable forma
 Zero runtime npm dependencies: only Node.js (>= 18) and the TypeScript
 compiler (dev dependency) are required.
 
+> **Note on PHI:** this is a local development tool — it performs no
+> authentication, authorization, or encryption. Read
+> [HIPAA considerations](#hipaa-considerations) before processing real claims.
+
 ## How it works
 
 ```
@@ -114,6 +118,172 @@ layout used by 837 claims:
 - known element counts (e.g. `CLM` = 9 in this knowledge base) are used to
   pad short segments so every labeled field keeps a stable
   `<segmentIndex>-<elementIndex>` key for the hover mapping.
+
+## HIPAA considerations
+
+> **Short answer:** this project is a **local development tool, not a
+> production PHI system**. It authenticates no one, authorizes nothing, and
+> does not encrypt PHI in transit or at rest. It is fine to run as long as it
+> only ever sees the bundled **synthetic** sample (which is not PHI) on a
+> machine you control. The moment **real claims** flow through it, it fails
+> several HIPAA Security Rule (45 CFR §164) technical safeguards. The fix is
+> not to re-architect this app but to run it **behind a wrapping API / reverse
+> proxy** that performs TLS termination, authentication, per-claim
+> authorization, and audit logging. Details below.
+
+### What this design already does right
+
+- **PHI never leaves the machine.** No external APIs, no LLM calls, no CDNs at
+  runtime, no telemetry: parsing, RAG, and HTML generation are 100% local, and
+  exported HTML is self-contained (works offline). Because no external
+  service ever touches the data, **no BAA is required** — *keep it that way*
+  (do not swap the local vector DB for a hosted service or add an LLM API
+  without a BAA + data-flow review).
+- **The bundled sample is synthetic** (`samples/sample-837.txt` uses fake
+  payer/provider/claim numbers), so normal dev/test use does not involve PHI.
+- `/files/` path handling is traversal-safe (`path.basename` + `.html` only),
+  and ingest bodies are capped at 20 MB.
+
+### Why it is NOT HIPAA-safe as-is
+
+1. **No authentication** (`src/server.ts`): the request handler never checks
+   who is asking. Anyone who can reach the port can ingest, list, read,
+   export, and search. → §164.312(a)(1) access control, §164.312(a)(2)(i)
+   unique user identification.
+2. **No authorization / no claim-view permissions**: there is no notion of
+   users, roles, or per-claim access. `GET /api/claims` (and the index page)
+   enumerates *all* claims, and `GET /files/<name>` serves *any* exported
+   HTML — with lazy generation on first request. → §164.308(a)(4) access
+   management, and Privacy Rule minimum-necessary (§164.502(b)).
+3. **No transport encryption**: plain HTTP only (`http.createServer`, no
+   TLS) → §164.312(e)(1) transmission security.
+4. **PHI at rest is unencrypted plaintext**: `data/vectorstore.json` stores
+   every ingested segment's **raw text** (`text: seg.raw`) plus claim
+   metadata, and each `output/claim-*.html` is a self-contained copy of the
+   **entire claim** that can be carried anywhere and opened in any browser.
+   No disk- or field-level encryption → §164.312(a)(1)(ii)(A) (addressable).
+
+5. **Search is a PHI-content oracle**: `GET /api/search?scope=seg` (or
+   `all`) returns raw segment text (up to 400 chars) for any ingested claim —
+   anyone can query across all claims' PHI content.
+6. **No audit controls**: only a stdout request line
+   (`method url -> status ms`), no identity, not stored, not protected →
+   §164.312(b).
+7. **No session management** (no inactivity timeout / automatic logoff) →
+   §164.312(a)(1)(ii)(B).
+8. **No integrity or contingency safeguards**: a single JSON file, no
+   checksums, no backup/DR story → §164.312(c)(1), §164.308(a)(7).
+9. **Defaults widen exposure**: the server binds to `0.0.0.0` by default
+   (`HOST` env), and 500 responses echo internal `err.message` to the client.
+
+### Making it safe: a wrapping API / proxy that enforces claim-view permissions
+
+Keep the app unchanged (or nearly so) and put an **enforcement layer** in
+front of it that owns everything the app does not: TLS, identity,
+per-claim permissions, and audit.
+
+```
+ user (browser)
+    │  HTTPS (TLS terminated here)
+    ▼
+ wrapping API / reverse proxy
+  · authenticate the user (SSO/OIDC/SAML + MFA, or strong unique credentials)
+  · enforce claim-view permissions on every PHI-touching route
+  · append-only audit log of every allow/deny
+  · filter list responses to claims the user may view
+    │  plain HTTP, internal only
+    ▼
+ this app — run with HOST=127.0.0.1 (loopback, unreachable outside the proxy)
+```
+
+1. **Loopback-only app.** Run with `HOST=127.0.0.1` (or a private interface)
+   so only the proxy can reach it; the app never listens on a public
+   interface.
+2. **TLS at the proxy.** The wrapper terminates HTTPS (nginx, Caddy, or a TLS
+   Node server); nothing PHI-shaped ever crosses a wire in the clear
+   (§164.312(e)(1)).
+3. **Authentication.** The wrapper authenticates every request (corporate
+   SSO/OIDC/SAML with MFA preferred; at minimum unique user IDs —
+   §164.312(a)(2)(i)) and holds the session; the app stays stateless.
+   Enforce inactivity timeouts / automatic logoff (§164.312(a)(1)(ii)(B)).
+
+4. **Claim-view authorization (the core of it).** The wrapper maintains an
+   ACL — e.g. `user → { view: [claimIds] }` or a policy like
+   `role = biller AND claim.facility = user.facility` — and checks it before
+   forwarding, **deny by default**. Since ingest also flows through the
+   wrapper, it can capture claim attributes (payer, facility, submitting
+   user) at ingest time and auto-grant visibility (e.g. to the submitting
+   user + their group). Route rules:
+
+   | Route | Rule |
+   | --- | --- |
+   | `GET /api/claims`, `GET /` | forward, then **filter** the list to claims the user may view |
+   | `GET /api/claims/:id` | `canView(user, claimId)`, else **403** |
+   | `POST\|GET /api/claims/:id/export` | `canView(user, claimId)`, else **403** |
+   | `GET /files/claim-<id>.html` | derive `claimId` from the name; `canView(user, claimId)`, else **403** (this also blocks lazy generation for non-viewable claims) |
+   | `POST /api/claims` (ingest) | role-gated (e.g. an `ingest` service account / batch role); interactive users denied, or granted visibility only to their own submissions |
+   | `GET /api/search` | **deny** (it is a PHI-content oracle); if a demo is needed, allow only `scope=kb` for users holding a search permission |
+   | `GET /healthz` | keep it internal; deny at the public edge |
+
+   Log every decision (allow/deny + reason) — this *is* the audit control
+   (§164.312(b)).
+5. **Treat the exported HTML as a PHI artifact.** Even for an authorized
+   viewer, the HTML is a portable, complete copy of the claim. Mitigations:
+   serve it only through the wrapper with `Cache-Control: no-store`; prefer
+   **short-lived signed URLs** (token bound to `claimId + user + expiry`)
+   over the stable `claim-<id>.html` name; add a **per-user watermark**
+   (user ID + timestamp) to the generated HTML; and consider generating on
+   demand and deleting the file after first authorized delivery (TTL)
+   instead of persisting `output/` indefinitely.
+6. **Encrypt PHI at rest.** The wrapper cannot encrypt the app's files, so do
+   it at the environment: LUKS/dm-crypt (or encrypted cloud volumes) for
+   `data/` and `output/`, and run the app as a dedicated least-privilege OS
+   user. If file-level (not just disk-level) encryption is required, that is
+   an app change: AES-GCM-encrypt segment text in `data/vectorstore.json`
+   with a KMS-held key, and stop persisting `output/*.html` — stream the HTML
+   from the export endpoint instead.
+7. **Integrity + contingency.** Checksum claim text at ingest and verify on
+   read (§164.312(c)(1)); encrypted backups of `data/` + a disaster-recovery
+   runbook (§164.308(a)(7)).
+8. **Operational hygiene.** A risk analysis (§164.308(a)(1)) scoped to the
+   wrapper + app; no real PHI in dev environments (keep using the synthetic
+   sample); workforce training; and re-audit the data flow before adding
+   anything external (LLM API, hosted vector DB) — that would require a BAA.
+
+#### Sketch of the wrapper (Node, schematic — not a full implementation)
+
+```js
+// wrapper.js — the enforcement layer in front of the app
+const https = require('https');
+const BACKEND = 'http://127.0.0.1:8370';        // app: loopback only
+
+const auth  = { /* OIDC/SAML session validation -> { user, roles } */ };
+const acl   = { canView(user, claimId) { /* grants or role+attribute policy */ } };
+const audit = { log(e) { /* append-only, tamper-protected store */ } };
+
+https.createServer({ key, cert }, (req, res) => {
+  const user = auth.user(req);                     // 1) authenticate (else 401)
+  if (!user) return res.writeHead(401).end();
+
+  const claimId =
+    (req.url.match(/^\/api\/claims\/([A-Za-z0-9-]+)/) || [])[1] ||
+    (req.url.match(/^\/files\/claim-([A-Za-z0-9-]+)\.html$/) || [])[1];
+
+  let decision;
+  if (req.url === '/healthz' || req.url.startsWith('/api/search'))
+    decision = 'deny';                             // no external healthz / search
+  else if (req.method === 'POST' && req.url === '/api/claims')
+    decision = auth.roles(req).includes('ingest') ? 'allow' : 'deny';
+  else if (claimId && !acl.canView(user, claimId))
+    decision = 'deny';                             // claim-view permission
+  else decision = req.url.startsWith('/api/claims') ? 'filter' : 'allow';
+
+  audit.log({ ts: new Date().toISOString(), user,
+              req: req.method + ' ' + req.url, claimId, decision }); // 2) audit
+  if (decision === 'deny') return res.writeHead(403).end('Forbidden');
+  proxyToBackend(req, res, { decision });          // 3) forward (or filter list)
+});
+```
 
 ## Project layout
 
