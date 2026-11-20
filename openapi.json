@@ -242,7 +242,7 @@
         "type": "object",
         "properties": {
           "text": { "type": "string", "description": "The plain-English explanation" },
-          "standard": { "type": [ "string", "null" ], "description": "ST04 interchange standard, e.g. 005010X222" },
+          "standard": { "type": [ "string", "null" ], "description": "ST03 implementation standard, e.g. 005010X222" },
           "claimType": { "type": [ "string", "null" ], "description": "BHT02 claim type code" },
           "claimTypeText": { "type": "string" },
           "preparedDate": { "type": [ "string", "null" ], "format": "date", "description": "BHT04 (null in de-identified mode)" },

@@ -53,7 +53,7 @@ export interface SummaryClaim {
 export interface ClaimSummary {
   /** The plain-English explanation. */
   text: string;
-  /** ST04 interchange standard (e.g. 005010X222). */
+  /** ST03 implementation standard identifier (e.g. 005010X222). */
   standard: string | null;
   /** BHT02 claim type code. */
   claimType: string | null;
@@ -144,8 +144,8 @@ export function buildClaimSummary(
   const payer = batch.find((s) => s.id === 'N1' && el(s, 0).toUpperCase() === '40');
   const remarks = segments.filter((s) => s.id === 'NT').map((s) => el(s, 2)).filter(Boolean);
 
-  const standard = st ? el(st, 3) : null;
-  if (standard) used.add('ST04');
+  const standard = st ? el(st, 2) : null;
+  if (standard) used.add('ST03');
   const claimType = bht ? el(bht, 1) : null;
   if (claimType) used.add('BHT02');
   const preparedDate = bht ? fmtDate(el(bht, 3)) : null;

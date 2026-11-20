@@ -163,6 +163,8 @@ async function main(): Promise<void> {
   assert.ok(full.text.includes('JOHN DOE') && full.text.includes('JANE DOE'), 'full summary must name the patients');
   assert.ok(full.text.includes('$450.00') && full.text.includes('$300.00'), 'full summary must state the billed amounts');
   assert.ok(full.text.includes('99213') && full.text.includes('99214'), 'full summary must include the service codes');
+  assert.strictEqual(full.standard, '005010X222', 'standard must come from ST03');
+  assert.ok(full.text.includes('(standard 005010X222)'), 'standard must be surfaced in the text');
   assert.strictEqual(full.totalBilled, 750, 'total billed must be 450 + 300');
   assert.ok(!full.usedElements.some((e) => e.startsWith('N3') || e.startsWith('N4')), 'summary must never use addresses');
   const deid = buildClaimSummary(segments, { deidentify: true });
