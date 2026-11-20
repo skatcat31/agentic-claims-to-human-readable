@@ -14,3 +14,4 @@ follow up prompts:
 - explain the HIPAA problems with the project and how you could address them
 - explain how to make the application production ready
 - add a new method to retreive the raw claim
+- generate an open api spec

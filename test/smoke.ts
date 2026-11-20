@@ -15,7 +15,7 @@ import { kbChunks, parseKbChunk } from '../src/knowledge837';
 import { retrieveSegmentSpec, labelClaim } from '../src/rag';
 import { buildHtml } from '../src/generate';
 import { ensureVendor } from '../src/vendor';
-import { SAMPLES_DIR, VENDOR_DIR } from '../src/paths';
+import { SAMPLES_DIR, VENDOR_DIR, OPENAPI_FILE } from '../src/paths';
 
 interface PayloadElement {
   key: string;
@@ -156,6 +156,15 @@ async function main(): Promise<void> {
       rawRebuilt.length +
       ' chars)'
   );
+
+  // 7. OpenAPI spec (source file + build copy in dist/)
+  const spec = JSON.parse(fs.readFileSync(OPENAPI_FILE, 'utf8'));
+  assert.strictEqual(spec.openapi, '3.0.3', 'expected OpenAPI 3.0.3');
+  for (const p of ['/', '/api/claims', '/api/claims/{claimId}', '/api/claims/{claimId}/raw', '/api/claims/{claimId}/export', '/files/{name}', '/api/search', '/healthz', '/openapi.json']) {
+    assert.ok(spec.paths && spec.paths[p], 'spec is missing path ' + p);
+  }
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'openapi.json')), 'build must copy openapi.json into dist/');
+  console.log('ok 7 - OpenAPI spec (' + Object.keys(spec.paths).length + ' paths, dist copy present)');
 
   console.log('\nAll smoke tests passed.');
 }

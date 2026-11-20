@@ -27,3 +27,4 @@ export const DATA_FILE = path.join(ROOT, 'data', 'vectorstore.json');
 export const OUTPUT_DIR = path.join(ROOT, 'output');
 export const VENDOR_DIR = path.join(ROOT, 'vendor');
 export const SAMPLES_DIR = path.join(ROOT, 'samples');
+export const OPENAPI_FILE = path.join(ROOT, 'openapi.json');

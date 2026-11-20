@@ -5,7 +5,7 @@
   "description": "RAG server + local vector database that ingests EDI 837 claims, parses them, and exports self-contained static HTML (React baked in) that renders the claim in a human-readable format.",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('fs').copyFileSync('openapi.json','dist/openapi.json')\"",
     "start": "npm run build && node dist/server.js",
     "serve": "node dist/server.js",
     "test": "npm run build && node dist/test/smoke.js",

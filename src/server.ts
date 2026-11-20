@@ -15,6 +15,7 @@
  *   GET  /files/:name          serve an exported HTML file (lazy-generated)
  *   GET  /api/search?q=&scope=&k=    similarity search (RAG demo)
  *   GET  /healthz              health check
+ *   GET  /openapi.json         OpenAPI 3.0 document (served from openapi.json)
  */
 
 import * as http from 'http';
@@ -27,7 +28,7 @@ import { kbChunks } from './knowledge837';
 import { labelClaim, LabelStats } from './rag';
 import { buildHtml } from './generate';
 import { ensureVendor } from './vendor';
-import { DATA_FILE, OUTPUT_DIR, VENDOR_DIR } from './paths';
+import { DATA_FILE, OUTPUT_DIR, VENDOR_DIR, OPENAPI_FILE } from './paths';
 
 const PORT = parseInt(process.env.PORT ?? '8370', 10);
 const HOST = process.env.HOST ?? '0.0.0.0';
@@ -297,6 +298,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
 
     if (m === 'GET' && p === '/healthz') {
       sendJson(res, 200, { ok: true, records: store.count() });
+      return;
+    }
+
+    if (m === 'GET' && p === '/openapi.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(fs.readFileSync(OPENAPI_FILE, 'utf8'));
       return;
     }
 

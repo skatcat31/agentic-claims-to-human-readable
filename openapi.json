@@ -1,0 +1,234 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "EDI 837 RAG Server",
+    "description": "Ingests EDI 837 health-care claims, parses them into segments/elements, retrieves 837 field definitions from a local vector store (RAG), and exports self-contained static HTML (React baked in). Local development tool with no authentication or authorization — see the README (HIPAA considerations) before processing real claims.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    { "url": "http://localhost:8370", "description": "Default; override with the PORT and HOST env vars" }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "indexPage",
+        "summary": "Index page: claim list + paste-to-ingest form",
+        "responses": {
+          "200": { "description": "HTML index page", "content": { "text/html": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/api/claims": {
+      "post": {
+        "operationId": "ingestClaim",
+        "summary": "Ingest a raw 837 claim (parse -> embed -> store in the vector DB)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/plain": { "schema": { "type": "string", "description": "Raw 837 text (~-terminated X12, or legacy |-separated)" } },
+            "application/json": { "schema": { "type": "object", "description": "One of claim / raw / text must hold the raw 837 string", "properties": { "claim": { "type": "string" }, "raw": { "type": "string" }, "text": { "type": "string" } } } }
+          }
+        },
+        "responses": {
+          "201": { "description": "Ingested", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IngestResult" } } } },
+          "400": { "$ref": "#/components/responses/Error400" }
+        }
+      },
+      "get": {
+        "operationId": "listClaims",
+        "summary": "List ingested claims",
+        "responses": {
+          "200": { "description": "All claim summaries", "content": { "application/json": { "schema": { "type": "object", "properties": { "claims": { "type": "array", "items": { "$ref": "#/components/schemas/ClaimListItem" } } } } } } }
+        }
+      }
+    },
+    "/api/claims/{claimId}": {
+      "parameters": [ { "$ref": "#/components/parameters/ClaimId" } ],
+      "get": {
+        "operationId": "getClaimMeta",
+        "summary": "Claim metadata",
+        "responses": {
+          "200": { "description": "Metadata", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClaimMeta" } } } },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      }
+    },
+    "/api/claims/{claimId}/raw": {
+      "parameters": [ { "$ref": "#/components/parameters/ClaimId" } ],
+      "get": {
+        "operationId": "getRawClaim",
+        "summary": "Reconstructed raw 837 text (segments joined with ~ from the vector DB)",
+        "description": "Normalized by the parser: line breaks became spaces and the ISA end-of-interchange control marker is not preserved byte-for-byte.",
+        "responses": {
+          "200": { "description": "Raw claim", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RawClaim" } } } },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      }
+    },
+    "/api/claims/{claimId}/export": {
+      "parameters": [ { "$ref": "#/components/parameters/ClaimId" } ],
+      "get": {
+        "operationId": "exportClaim",
+        "summary": "Generate the static HTML (JSON reply)",
+        "responses": {
+          "200": { "description": "Export created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExportResult" } } } },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      },
+      "post": {
+        "operationId": "exportClaimPost",
+        "summary": "Generate the static HTML (JSON reply) — POST variant",
+        "responses": {
+          "200": { "description": "Export created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExportResult" } } } },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      }
+    },
+    "/files/{name}": {
+      "get": {
+        "operationId": "serveExportedHtml",
+        "summary": "Serve an exported HTML file (lazy-generated on first request)",
+        "parameters": [
+          { "name": "name", "in": "path", "required": true, "description": "Export file name, e.g. claim-837-abc.html", "schema": { "type": "string", "pattern": "^[\\w.-]+\\.html$" } }
+        ],
+        "responses": {
+          "200": { "description": "Self-contained HTML (React baked in)", "content": { "text/html": { "schema": { "type": "string" } } } },
+          "400": { "description": "Only .html files can be served", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "description": "No such export / claim", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "operationId": "search",
+        "summary": "Similarity search over the vector DB (RAG demo)",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "description": "Query text", "schema": { "type": "string" } },
+          { "name": "scope", "in": "query", "description": "Record type filter", "schema": { "type": "string", "enum": [ "kb", "seg", "meta", "all" ], "default": "kb" } },
+          { "name": "k", "in": "query", "description": "Max hits (capped at 25)", "schema": { "type": "integer", "minimum": 1, "maximum": 25, "default": 5 } }
+        ],
+        "responses": {
+          "200": { "description": "Hits", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchResults" } } } },
+          "400": { "$ref": "#/components/responses/Error400" }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "summary": "Health check",
+        "responses": {
+          "200": { "description": "Status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthStatus" } } } }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openApiSpec",
+        "summary": "This OpenAPI document",
+        "responses": {
+          "200": { "description": "OpenAPI 3.0 document (JSON)", "content": { "application/json": { "schema": { "type": "object" } } } }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "ClaimId": { "name": "claimId", "in": "path", "required": true, "description": "Claim id as returned by ingest", "schema": { "type": "string", "pattern": "^[A-Za-z0-9-]+$", "example": "837-mwp63njn-622b" } }
+    },
+    "responses": {
+      "Error400": { "description": "Bad request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Error404": { "description": "Not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "Error": { "type": "object", "properties": { "error": { "type": "string" } }, "required": [ "error" ] },
+      "ClaimMeta": {
+        "type": "object",
+        "properties": {
+          "claimId": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "segmentCount": { "type": "integer" },
+          "elementCount": { "type": "integer" },
+          "bytes": { "type": "integer", "description": "Raw text size in bytes" },
+          "fileName": { "type": "string", "description": "Export file name under output/" }
+        },
+        "required": [ "claimId", "createdAt", "segmentCount", "elementCount", "bytes", "fileName" ]
+      },
+      "ClaimListItem": {
+        "type": "object",
+        "properties": {
+          "claimId": { "type": "string" },
+          "segmentCount": { "type": "integer" },
+          "elementCount": { "type": "integer" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "fileName": { "type": "string" }
+        },
+        "required": [ "claimId", "segmentCount", "elementCount", "createdAt", "fileName" ]
+      },
+      "IngestResult": {
+        "type": "object",
+        "properties": {
+          "claimId": { "type": "string" },
+          "meta": { "$ref": "#/components/schemas/ClaimMeta" },
+          "url": { "type": "string", "description": "Metadata endpoint for the new claim" }
+        },
+        "required": [ "claimId", "meta", "url" ]
+      },
+      "RawClaim": {
+        "type": "object",
+        "properties": {
+          "claimId": { "type": "string" },
+          "raw": { "type": "string", "description": "Reconstructed interchange (segments joined with ~)" },
+          "segmentCount": { "type": "integer" }
+        },
+        "required": [ "claimId", "raw", "segmentCount" ]
+      },
+      "LabelStats": {
+        "type": "object",
+        "properties": {
+          "labeledElements": { "type": "integer" },
+          "totalElements": { "type": "integer" },
+          "kbHits": { "type": "integer" }
+        },
+        "required": [ "labeledElements", "totalElements", "kbHits" ]
+      },
+      "ExportResult": {
+        "type": "object",
+        "properties": {
+          "claimId": { "type": "string" },
+          "fileName": { "type": "string" },
+          "filePath": { "type": "string" },
+          "url": { "type": "string", "description": "URL under /files/" },
+          "rag": { "$ref": "#/components/schemas/LabelStats" }
+        },
+        "required": [ "claimId", "fileName", "filePath", "url", "rag" ]
+      },
+      "SearchHit": {
+        "type": "object",
+        "properties": {
+          "score": { "type": "number", "description": "Cosine similarity, 4 decimal places" },
+          "claimId": { "type": "string" },
+          "type": { "type": "string", "enum": [ "kb", "seg", "meta" ] },
+          "segId": { "type": "string" },
+          "segIndex": { "type": "integer" },
+          "text": { "type": "string", "description": "Truncated to 400 characters" }
+        },
+        "required": [ "score", "claimId", "type", "segId", "segIndex", "text" ]
+      },
+      "SearchResults": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" },
+          "scope": { "type": "string", "enum": [ "kb", "seg", "meta", "all" ] },
+          "hits": { "type": "array", "items": { "$ref": "#/components/schemas/SearchHit" } }
+        },
+        "required": [ "query", "scope", "hits" ]
+      },
+      "HealthStatus": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" }, "records": { "type": "integer", "description": "Records in the vector DB" } },
+        "required": [ "ok", "records" ]
+      }
+    }
+  }
+}

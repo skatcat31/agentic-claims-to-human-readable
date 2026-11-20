@@ -82,6 +82,7 @@ npm test
 | POST   | `/api/claims/:id/export`          | Generate the static HTML (JSON reply)          |
 | GET    | `/files/:name`                    | Serve an exported HTML (lazy-generated)        |
 | GET    | `/api/search?q=&scope=&k=`        | Similarity search over the vector DB (RAG demo)|
+| GET    | `/openapi.json`                   | OpenAPI 3.0 document (spec of this API)        |
 ## The exported page
 
 1200px max content width, two side-by-side cards (stacked on narrow screens):
@@ -408,6 +409,7 @@ src/vendor.ts         one-time download of the React UMD bundles
 src/server.ts         HTTP API + index page
 test/smoke.ts         end-to-end smoke test
 samples/sample-837.txt  example 837P (005010X222) claim
+openapi.json            OpenAPI 3.0 spec (served at /openapi.json, copied to dist/ at build)
 data/                 vector DB (generated, git-ignored)
 output/               exported HTML files (generated, git-ignored)
 vendor/               React UMD bundles (downloaded, git-ignored)
