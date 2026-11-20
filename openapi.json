@@ -65,6 +65,20 @@
         }
       }
     },
+    "/api/claims/{claimId}/summary": {
+      "parameters": [ { "$ref": "#/components/parameters/ClaimId" } ],
+      "get": {
+        "operationId": "getClaimSummary",
+        "summary": "Plain-English claim summary: what the claim is charging, for which patient(s), from which provider to which payer",
+        "parameters": [
+          { "name": "deidentify", "in": "query", "description": "When 1 or true, apply Safe-Harbor-style redaction (164.514(b)(2)) so the summary is no longer PHI", "schema": { "type": "string", "enum": [ "1", "true" ] } }
+        ],
+        "responses": {
+          "200": { "description": "Summary", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClaimSummary" } } } },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      }
+    },
     "/api/claims/{claimId}/export": {
       "parameters": [ { "$ref": "#/components/parameters/ClaimId" } ],
       "get": {
@@ -223,6 +237,46 @@
           "hits": { "type": "array", "items": { "$ref": "#/components/schemas/SearchHit" } }
         },
         "required": [ "query", "scope", "hits" ]
+      },
+      "ClaimSummary": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "The plain-English explanation" },
+          "standard": { "type": [ "string", "null" ], "description": "ST04 interchange standard, e.g. 005010X222" },
+          "claimType": { "type": [ "string", "null" ], "description": "BHT02 claim type code" },
+          "claimTypeText": { "type": "string" },
+          "preparedDate": { "type": [ "string", "null" ], "format": "date", "description": "BHT04 (null in de-identified mode)" },
+          "totalBilled": { "type": "number" },
+          "claimCount": { "type": "integer" },
+          "claims": { "type": "array", "items": { "$ref": "#/components/schemas/SummaryClaim" } },
+          "redactions": { "type": "array", "items": { "type": "string" }, "description": "Categories redacted when deidentify=1 (empty otherwise)" },
+          "usedElements": { "type": "array", "items": { "type": "string" }, "description": "Claim elements the summary used (minimum-necessary audit trail; addresses never included)" }
+        },
+        "required": [ "text", "claimTypeText", "totalBilled", "claimCount", "claims", "redactions", "usedElements" ]
+      },
+      "SummaryClaim": {
+        "type": "object",
+        "properties": {
+          "claimNumber": { "type": "string", "description": "CLM01 ('[claim number redacted]' in de-identified mode)" },
+          "claimType": { "type": "string", "description": "CLM04 claim type code" },
+          "patient": { "type": "string", "description": "Patient name ('[name redacted]' in de-identified mode)" },
+          "patientDetail": { "type": "string", "description": "e.g. 'male, 56 years old' (empty in de-identified mode)" },
+          "billed": { "type": "number", "description": "CLM05 total charge amount" },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": { "type": "string", "description": "CPT/HCPCS code (SV102)" },
+                "description": { "type": "string", "description": "Plain-English service name, when known" },
+                "units": { "type": "integer" },
+                "unitAmount": { "type": [ "number", "null" ] }
+              },
+              "required": [ "code", "units" ]
+            }
+          }
+        },
+        "required": [ "claimNumber", "claimType", "patient", "billed", "lines" ]
       },
       "HealthStatus": {
         "type": "object",

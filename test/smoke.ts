@@ -13,6 +13,7 @@ import { VectorStore } from '../src/vectorstore';
 import { parse837, ParsedSegment } from '../src/parse837';
 import { kbChunks, parseKbChunk } from '../src/knowledge837';
 import { retrieveSegmentSpec, labelClaim } from '../src/rag';
+import { buildClaimSummary } from '../src/summary';
 import { buildHtml } from '../src/generate';
 import { ensureVendor } from '../src/vendor';
 import { SAMPLES_DIR, VENDOR_DIR, OPENAPI_FILE } from '../src/paths';
@@ -157,14 +158,28 @@ async function main(): Promise<void> {
       ' chars)'
   );
 
-  // 7. OpenAPI spec (source file + build copy in dist/)
+  // 7. Claim summary (plain English, full + de-identified)
+  const full = buildClaimSummary(segments, { deidentify: false });
+  assert.ok(full.text.includes('JOHN DOE') && full.text.includes('JANE DOE'), 'full summary must name the patients');
+  assert.ok(full.text.includes('$450.00') && full.text.includes('$300.00'), 'full summary must state the billed amounts');
+  assert.ok(full.text.includes('99213') && full.text.includes('99214'), 'full summary must include the service codes');
+  assert.strictEqual(full.totalBilled, 750, 'total billed must be 450 + 300');
+  assert.ok(!full.usedElements.some((e) => e.startsWith('N3') || e.startsWith('N4')), 'summary must never use addresses');
+  const deid = buildClaimSummary(segments, { deidentify: true });
+  assert.ok(!deid.text.includes('DOE') && !deid.text.includes('SMITH'), 'de-identified summary must not contain names');
+  assert.ok(!deid.text.includes('2025-11-19') && !deid.text.includes('1234567890'), 'de-identified summary must not contain dates or claim numbers');
+  assert.ok(deid.text.includes('$450.00') && deid.text.includes('99213'), 'de-identified summary must keep amounts and service codes');
+  assert.ok(deid.redactions.length >= 3, 'de-identified summary must report its redactions');
+  console.log('ok 7 - claim summary (plain English + de-identified variant)');
+
+  // 8. OpenAPI spec (source file + build copy in dist/)
   const spec = JSON.parse(fs.readFileSync(OPENAPI_FILE, 'utf8'));
   assert.strictEqual(spec.openapi, '3.0.3', 'expected OpenAPI 3.0.3');
-  for (const p of ['/', '/api/claims', '/api/claims/{claimId}', '/api/claims/{claimId}/raw', '/api/claims/{claimId}/export', '/files/{name}', '/api/search', '/healthz', '/openapi.json']) {
+  for (const p of ['/', '/api/claims', '/api/claims/{claimId}', '/api/claims/{claimId}/raw', '/api/claims/{claimId}/summary', '/api/claims/{claimId}/export', '/files/{name}', '/api/search', '/healthz', '/openapi.json']) {
     assert.ok(spec.paths && spec.paths[p], 'spec is missing path ' + p);
   }
   assert.ok(fs.existsSync(path.join(__dirname, '..', 'openapi.json')), 'build must copy openapi.json into dist/');
-  console.log('ok 7 - OpenAPI spec (' + Object.keys(spec.paths).length + ' paths, dist copy present)');
+  console.log('ok 8 - OpenAPI spec (' + Object.keys(spec.paths).length + ' paths, dist copy present)');
 
   console.log('\nAll smoke tests passed.');
 }

@@ -5,6 +5,7 @@
  *   node dist/cli.js ingest <file|->
  *   node dist/cli.js export <claimId>
  *   node dist/cli.js raw <claimId>
+ *   node dist/cli.js summary <claimId> [deidentified]
  */
 
 import * as fs from 'fs';
@@ -25,6 +26,8 @@ function usage(): void {
   console.log('  node dist/cli.js ingest <file|->      ingest an 837 file (or - for stdin)');
   console.log('  node dist/cli.js export <claimId>     export a claim to static HTML');
   console.log('  node dist/cli.js raw <claimId>        print the raw 837 text (reconstructed)');
+  console.log('  node dist/cli.js summary <claimId>    print a plain-English claim summary');
+  console.log('  node dist/cli.js summary <claimId> deidentified   same, with PHI redacted');
 }
 
 function readStdin(): Promise<string> {
@@ -112,6 +115,23 @@ async function main(): Promise<void> {
       return;
     }
     console.log(j.raw);
+    return;
+  }
+
+  if (cmd === 'summary') {
+    if (!arg) {
+      usage();
+      return;
+    }
+    const deid = process.argv[4] === 'deidentified';
+    const r = await fetch(BASE + '/api/claims/' + arg + '/summary' + (deid ? '?deidentify=1' : ''));
+    const j = (await r.json()) as { error?: string; text?: string };
+    if (!r.ok || !j.text) {
+      console.error('Error:', j.error ?? 'unknown');
+      process.exitCode = 1;
+      return;
+    }
+    console.log(j.text);
     return;
   }
 

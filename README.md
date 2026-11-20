@@ -58,6 +58,7 @@ node dist/cli.js ingest samples/sample-837.txt
 node dist/cli.js list
 node dist/cli.js export <claimId>
 node dist/cli.js raw <claimId>
+node dist/cli.js summary <claimId>
 
 # open the exported page (also opens in any browser, fully offline)
 #   output/claim-<id>.html
@@ -79,6 +80,7 @@ npm test
 | GET    | `/api/claims`                     | List ingested claims                           |
 | GET    | `/api/claims/:id`                 | Claim metadata                                 |
 | GET    | `/api/claims/:id/raw`             | Reconstructed raw 837 text (from the vector DB)|
+| GET    | `/api/claims/:id/summary`         | Plain-English claim summary (`?deidentify=1` redacts PHI)|
 | POST   | `/api/claims/:id/export`          | Generate the static HTML (JSON reply)          |
 | GET    | `/files/:name`                    | Serve an exported HTML (lazy-generated)        |
 | GET    | `/api/search?q=&scope=&k=`        | Similarity search over the vector DB (RAG demo)|
@@ -221,7 +223,7 @@ per-claim permissions, and audit.
    | Route | Rule |
    | --- | --- |
    | `GET /api/claims`, `GET /` | forward, then **filter** the list to claims the user may view |
-   | `GET /api/claims/:id`, `GET /api/claims/:id/raw` | `canView(user, claimId)`, else **403** |
+   | `GET /api/claims/:id`, `GET /api/claims/:id/raw`, `GET /api/claims/:id/summary` | `canView(user, claimId)`, else **403** (the summary's `deidentify=1` variant is no longer PHI once redacted, but is still gated by default) |
    | `POST\|GET /api/claims/:id/export` | `canView(user, claimId)`, else **403** |
    | `GET /files/claim-<id>.html` | derive `claimId` from the name; `canView(user, claimId)`, else **403** (this also blocks lazy generation for non-viewable claims) |
    | `POST /api/claims` (ingest) | role-gated (e.g. an `ingest` service account / batch role); interactive users denied, or granted visibility only to their own submissions |
@@ -237,7 +239,12 @@ per-claim permissions, and audit.
    over the stable `claim-<id>.html` name; add a **per-user watermark**
    (user ID + timestamp) to the generated HTML; and consider generating on
    demand and deleting the file after first authorized delivery (TTL)
-   instead of persisting `output/` indefinitely.
+   instead of persisting `output/` indefinitely. When only an explanation is
+   needed (a ticket, an email, a report), prefer
+   `GET /api/claims/:id/summary?deidentify=1`: Safe-Harbor-style redaction
+   (names, party IDs, claim numbers, dates, age/sex detail, remarks) keeps
+   amounts and service codes, so the billing stays explainable without the
+   output being PHI.
 6. **Encrypt PHI at rest.** The wrapper cannot encrypt the app's files, so do
    it at the environment: LUKS/dm-crypt (or encrypted cloud volumes) for
    `data/` and `output/`, and run the app as a dedicated least-privilege OS

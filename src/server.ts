@@ -11,6 +11,7 @@
  *   GET  /api/claims           list ingested claims
  *   GET  /api/claims/:id       claim metadata
  *   GET  /api/claims/:id/raw   reconstructed raw 837 text (from the vector DB)
+ *   GET  /api/claims/:id/summary  plain-English claim summary (?deidentify=1 redacts PHI)
  *   POST|GET /api/claims/:id/export   generate the static HTML (JSON reply)
  *   GET  /files/:name          serve an exported HTML file (lazy-generated)
  *   GET  /api/search?q=&scope=&k=    similarity search (RAG demo)
@@ -23,9 +24,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { VectorStore } from './vectorstore';
-import { parse837 } from './parse837';
+import { parse837, ParsedSegment } from './parse837';
 import { kbChunks } from './knowledge837';
 import { labelClaim, LabelStats } from './rag';
+import { buildClaimSummary } from './summary';
 import { buildHtml } from './generate';
 import { ensureVendor } from './vendor';
 import { DATA_FILE, OUTPUT_DIR, VENDOR_DIR, OPENAPI_FILE } from './paths';
@@ -136,11 +138,12 @@ function ingestClaim(rawText: string): IngestResult {
  * RAG export: retrieve the claim's segments from the vector DB, retrieve
  * KB definitions for every segment, then generate the static HTML file.
  */
-function exportClaim(claimId: string): ExportResult | null {
+/** Load a claim's segments from the vector DB and label them via RAG. */
+function loadLabeledClaim(claimId: string): { segments: ParsedSegment[]; stats: LabelStats } | null {
   const segs = store.byClaim(claimId, 'seg');
   if (!segs.length) return null;
 
-  const segments = segs.map((r) => {
+  const segments: ParsedSegment[] = segs.map((r) => {
     const values = r.text.split('*').map((v) => v.trim()).slice(1); // drop the segment ID token
     return {
       index: r.segIndex,
@@ -157,6 +160,13 @@ function exportClaim(claimId: string): ExportResult | null {
   });
 
   const stats = labelClaim(store, { segments, segmentCount: segments.length, raw: '' });
+  return { segments, stats };
+}
+
+function exportClaim(claimId: string): ExportResult | null {
+  const claim = loadLabeledClaim(claimId);
+  if (!claim) return null;
+  const { segments, stats } = claim;
 
   const html = buildHtml({
     claimId,
@@ -393,6 +403,19 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         return;
       }
       sendJson(res, 200, { claimId: rawMatch[1], raw: claim.raw, segmentCount: claim.segmentCount });
+      return;
+    }
+
+    const summaryMatch = p.match(/^\/api\/claims\/([A-Za-z0-9-]+)\/summary$/);
+    if (summaryMatch && m === 'GET') {
+      const claim = loadLabeledClaim(summaryMatch[1]);
+      if (!claim) {
+        sendJson(res, 404, { error: 'Claim not found: ' + summaryMatch[1] });
+        return;
+      }
+      const deid = ['1', 'true'].includes(url.searchParams.get('deidentify') ?? '');
+      const summary = buildClaimSummary(claim.segments, { deidentify: deid });
+      sendJson(res, 200, { claimId: summaryMatch[1], ...summary });
       return;
     }
 

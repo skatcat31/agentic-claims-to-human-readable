@@ -15,3 +15,4 @@ follow up prompts:
 - explain how to make the application production ready
 - add a new method to retreive the raw claim
 - generate an open api spec
+- add a new method to generate a claim summary, make it hipaa compliant
