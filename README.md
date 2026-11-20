@@ -285,6 +285,111 @@ https.createServer({ key, cert }, (req, res) => {
 });
 ```
 
+## Production readiness
+
+The current shape — one process, JSON state files in the repo root, and the
+knowledge base compiled into the code — is right for a local tool and wrong
+for production. The primary move is to **separate knowledge, database, and
+storage from the code**, which also makes the app tier stateless and
+horizontally scalable.
+
+### Separating knowledge, database, and storage from code
+
+| State | Today (in the repo) | Production target |
+| --- | --- | --- |
+| 837 knowledge base | TS module `src/knowledge837.ts` — definitions ship inside the compiled app; re-seeded into the vector DB at startup | versioned **data** file (e.g. `knowledge/837p-005010.json` or an object-storage path) loaded at boot; KB updates become a data release, no app rebuild |
+| vector DB (claim segments + KB records) | `data/vectorstore.json` — one JSON file in the project root, written by the app process | a real database (Postgres + pgvector, Qdrant, …) behind `DATABASE_URL`; the `VectorStore` class in `src/vectorstore.ts` (`add / search / get / byClaim / listMeta / save / load`) is the seam — swap the file backend for a DB backend |
+| exports | `output/claim-*.html` in the project root | object storage (S3/GCS) with bucket policies, server-side encryption, lifecycle TTL — served only via the wrapping API's signed URLs; or don't persist at all and stream from `/export` |
+| React bundles | `vendor/` in the project root (one-time download) | baked into the container image (no PHI involved; a CDN is also fine) |
+| configuration | `PORT` / `HOST` env vars only | full 12-factor config: `DATABASE_URL`, KB path, storage endpoint, log level; secrets (DB creds, storage keys, TLS certs) via a secret manager, never in the repo |
+
+Step 0 (cheap, no schema change): `src/paths.ts` already centralizes
+`DATA_FILE` / `OUTPUT_DIR` / `VENDOR_DIR` — make them env-overridable so
+state directories live wherever the deployment puts them.
+
+**Knowledge base.** Move the 39 segment specs out of TS into a versioned
+shape — `{ version, standard: "005010X222", segments: [{ id, name,
+elements: [[code, label, description], …] }] }` — and make
+`knowledge837.ts` a loader. Then: multiple KBs can coexist (837P/I/D,
+4010/5010); the KB *source* is data you release and review independently of
+the app (it may still live in a repo — as data, not code); KB updates
+re-seed the `kb` records via an admin tool or migration without touching
+claims; and stamping the `kbVersion` into claim metadata at ingest keeps
+re-exports stable over time.
+
+**Database.** A natural schema is `claims(claimId PK, createdAt, meta
+JSONB, checksum)` + `segments(claimId, segId, segIndex, rawText, vector)`
+with index-backed (e.g. HNSW) top-k search and unique constraints.
+Embeddings stay local — the deterministic hashing trick needs no external
+embedding service, so no PHI leaves the data tier. Idempotent ingest:
+derive an idempotency key from the interchange/group control numbers
+(ISA05–06, ST02) so resubmitting the same interchange doesn't duplicate
+it. If file-level PHI encryption is required (see
+[HIPAA considerations](#hipaa-considerations)), it is applied here:
+`rawText` stored AES-GCM-encrypted under a KMS key, decrypted only inside
+the app.
+
+**Storage.** Exports to S3/GCS: bucket policy allows writes only for the
+wrapping API's role; reads only via short-lived signed URLs (ties into the
+claim-view ACL); a lifecycle rule deletes objects after N days; SSE
+enabled. Alternative: skip persistence entirely — the "file" becomes a
+streamed response from the export endpoint, and the only durable PHI is
+the database rows.
+
+### Target architecture
+
+```
+  browser
+     │ HTTPS
+     ▼
+  wrapping API (authN / authZ / audit — see HIPAA considerations)
+     │ internal HTTP
+     ▼
+ ┌─────────────────────────────────────────────┐
+ │  app tier — N stateless pods (this code)    │
+ └──────┬──────────────────────────┬───────────┘
+        ▼                          ▼
+ ┌─────────────────────┐   ┌──────────────────────────┐
+ │ Postgres + pgvector │   │ object storage            │
+ │  · claims           │   │  · exports → signed URLs │
+ │  · segments (PHI)   │   │    + lifecycle TTL       │
+ │  · KB records       │   │  · React bundles         │
+ └─────────▲───────────┘   └──────────────────────────┘
+           │ seeded at boot / on KB release (versioned data,
+           │ not code)
+ ┌─────────┴──────────────────────────────────────┐
+ │ KB definition files: 837p-005010.json,        │
+ │ 837i-…, 837d-… (4010/5010, P/I/D)             │
+ └────────────────────────────────────────────────┘
+```
+
+### Other production-readiness work
+
+1. **Packaging & deploy.** Dockerfile (node:20-alpine, non-root user, no
+   public ports — the app listens on loopback/VPC-only behind the
+   wrapper), liveness/readiness probes on `/healthz`, k8s or systemd,
+   immutable images, rolling deploys with instant rollback.
+2. **Observability.** Structured JSON logs with request IDs (log `claimId`
+   — metadata — never raw segment text), request/latency metrics (a
+   `/metrics` endpoint or log-based), alerting on 5xx rate and slow
+   searches; stop echoing `err.message` in 500 responses — return a
+   generic error with a request ID and log the detail server-side.
+3. **API hardening.** Rate limiting per identity, strict content-type on
+   ingest, `Cache-Control: no-store` on all PHI responses, request IDs in
+   responses; keep CORS off. The 20 MB body cap moves to the wrapper.
+4. **Data lifecycle.** Checksums at ingest (integrity), a retention policy
+   + secure deletion (claims, segments, and exported objects shredded
+   together), encrypted backups + a DR runbook for the data tier.
+5. **CI/CD.** Typecheck + smoke test + a parser fixture regression suite
+   (commit the X12 fixtures referenced in [References](#references) as
+   test data) on every push; signed images; KB data releases gated by the
+   same pipeline (validate KB JSON against the segment-spec shape before
+   seeding).
+6. **Scale & throughput.** Horizontal scale is now just adding pods
+   (state is external); batch ingest for multi-claim interchange files;
+   vector search on a database index instead of a full scan of a JSON
+   blob.
+
 ## Project layout
 
 ```
