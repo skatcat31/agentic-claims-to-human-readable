@@ -1,0 +1,23 @@
+{
+  "name": "agentic-claims-to-human-readable",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RAG server + local vector database that ingests EDI 837 claims, parses them, and exports self-contained static HTML (React baked in) that renders the claim in a human-readable format.",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/server.js",
+    "serve": "node dist/server.js",
+    "test": "npm run build && node dist/test/smoke.js",
+    "cli": "node dist/cli.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
+
