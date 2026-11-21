@@ -100,6 +100,24 @@ export class VectorStore {
     return record;
   }
 
+  /**
+   * Insert or replace a record on the logical key
+   * (`claimId:type:segId:segIndex`). Used by the AI KB fill (see
+   * src/aidefinitions.ts) to refresh an existing definition instead of
+   * adding a duplicate.
+   */
+  upsert(opts: AddOptions): VectorRecord {
+    const key = opts.claimId + ':' + opts.type + ':' + opts.segId + ':' + (opts.segIndex ?? -1);
+    const existing = this.byKey.get(key);
+    if (existing) {
+      existing.text = opts.text;
+      existing.meta = opts.meta ?? {};
+      existing.vector = embedSparse(opts.text, this.dim);
+      return existing;
+    }
+    return this.add(opts);
+  }
+
   /** Similarity search with optional filters, sorted by score desc. */
   search(queryText: string, opts: SearchOptions = {}): ScoredRecord[] {
     const q = embedSparse(queryText, this.dim);

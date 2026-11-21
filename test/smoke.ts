@@ -7,6 +7,7 @@
 
 import * as assert from 'assert';
 import * as fs from 'fs';
+import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import { VectorStore } from '../src/vectorstore';
@@ -14,6 +15,7 @@ import { parse837, ParsedSegment } from '../src/parse837';
 import { kbChunks, parseKbChunk } from '../src/knowledge837';
 import { retrieveSegmentSpec, labelClaim } from '../src/rag';
 import { buildClaimSummary } from '../src/summary';
+import { findKbGaps, ensureKbCoverage } from '../src/aidefinitions';
 import { buildHtml } from '../src/generate';
 import { ensureVendor } from '../src/vendor';
 import { SAMPLES_DIR, VENDOR_DIR, OPENAPI_FILE } from '../src/paths';
@@ -182,6 +184,111 @@ async function main(): Promise<void> {
   }
   assert.ok(fs.existsSync(path.join(__dirname, '..', 'openapi.json')), 'build must copy openapi.json into dist/');
   console.log('ok 8 - OpenAPI spec (' + Object.keys(spec.paths).length + ' paths, dist copy present)');
+
+  // 9. AI KB fill (gap detection + mock OpenAI-compatible endpoint)
+  const TRN_CHUNK =
+    'SEG TRN Transmission Information\n' +
+    'EL 01 TRN01 Transmission Kind Code :: Kind of transmission (1 = normal, 2 = test).\n' +
+    'EL 02 TRN02 Transmission Number :: Unique transmission control number.\n' +
+    'EL 03 TRN03 Transmission Date :: Date of transmission (YYYYMMDD).\n' +
+    'EL 04 TRN04 Transmission Time :: Time of transmission (HHMM).\n' +
+    'EL 05 TRN05 Transmission Kind Qualifier :: 1 = normal, 2 = test, X = unspecified.';
+  const aiCalls: string[] = [];
+  const aiServer = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      aiCalls.push(body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'Here you go:\n```\n' + TRN_CHUNK + '\n```' } }] }));
+    });
+  });
+  await new Promise<void>((resolve) => aiServer.listen(0, '127.0.0.1', () => resolve()));
+  const aiPort = (aiServer.address() as { port: number }).port;
+  const aiCfg = { endpoint: 'http://127.0.0.1:' + aiPort + '/v1/chat/completions', model: 'mock-model', timeoutMs: 5000 };
+  const quiet = (): void => {};
+
+  // a claim containing a segment the KB does not know (TRN)
+  const trnText = raw.replace('ST*837*0001*005010X222~', 'ST*837*0001*005010X222~\nTRN*1*T123*20251119*1045*X~');
+  const parsedTrn = parse837(trnText);
+  assert.ok(parsedTrn.segments.some((s) => s.id === 'TRN'), 'claim must contain the unknown TRN segment');
+
+  const fillStoreFile = path.join(os.tmpdir(), 'smoke-kb-fill-' + Date.now() + '.json');
+  const fillStore = new VectorStore(fillStoreFile);
+  await fillStore.load();
+  for (const c of kbChunks())
+    fillStore.add({ claimId: 'kb', type: 'kb', segId: c.segId, segIndex: 0, text: c.text, meta: { name: c.name } });
+
+  const gaps = findKbGaps(fillStore, parsedTrn.segments);
+  assert.strictEqual(gaps.length, 1, 'exactly one KB gap expected (TRN), got ' + JSON.stringify(gaps.map((g) => g.segId)));
+  assert.strictEqual(gaps[0].segId, 'TRN');
+  assert.deepStrictEqual(gaps[0].missing, [1, 2, 3, 4, 5]);
+
+  const r1 = await ensureKbCoverage(fillStore, parsedTrn.segments, aiCfg, quiet);
+  assert.strictEqual(r1.disabled, false);
+  assert.strictEqual(r1.filled.length, 1, 'TRN must be filled from the AI endpoint');
+  assert.strictEqual(r1.failed.length, 0);
+  assert.strictEqual(aiCalls.length, 1, 'exactly one AI call');
+  const promptBody = (JSON.parse(aiCalls[0]) as { messages: { content: string }[] }).messages[0].content;
+  assert.ok(promptBody.includes('TRN') && promptBody.includes('TRN05'), 'prompt asks for the TRN positions');
+  assert.ok(promptBody.includes('005010X222'), 'prompt carries the standard version (ST03)');
+  assert.ok(!/DOE|JOHN|1234567890|450\.00/.test(promptBody), 'prompt must not contain claim values (no PHI)');
+
+  const trnSpec = retrieveSegmentSpec(fillStore, 'TRN');
+  assert.ok(trnSpec && trnSpec.spec.segId === 'TRN', 'TRN spec now retrievable from the KB');
+  assert.ok(trnSpec!.spec.elements[5], 'TRN05 defined');
+
+  labelClaim(fillStore, parsedTrn);
+  const trnSeg = parsedTrn.segments.find((s) => s.id === 'TRN')!;
+  assert.ok((trnSeg.elements[0].name ?? '').startsWith('TRN01'), 'TRN01 labeled from the AI definition: ' + trnSeg.elements[0].name);
+  assert.ok(!/Element 1$/.test(trnSeg.elements[0].name ?? ''), 'no fallback label left on TRN01');
+
+  // persisted round-trip
+  fillStore.save();
+  const refillStore = new VectorStore(fillStoreFile);
+  await refillStore.load();
+  assert.ok(retrieveSegmentSpec(refillStore, 'TRN'), 'AI-filled KB chunk survives a reload');
+
+  // idempotent: second run finds no gaps, no extra AI call
+  const r2 = await ensureKbCoverage(fillStore, parsedTrn.segments, aiCfg, quiet);
+  assert.strictEqual(r2.filled.length, 0, 'no re-fetch when the KB already has the definition');
+  assert.strictEqual(aiCalls.length, 1, 'still exactly one AI call');
+
+  // disabled (no endpoint): reports the gap, changes nothing, does not throw
+  const gapStore2File = path.join(os.tmpdir(), 'smoke-kb-fill2-' + Date.now() + '.json');
+  const gapStore2 = new VectorStore(gapStore2File);
+  await gapStore2.load();
+  for (const c of kbChunks())
+    gapStore2.add({ claimId: 'kb', type: 'kb', segId: c.segId, segIndex: 0, text: c.text, meta: { name: c.name } });
+  const r3 = await ensureKbCoverage(gapStore2, parsedTrn.segments, null, quiet);
+  assert.strictEqual(r3.disabled, true);
+  assert.strictEqual(r3.filled.length, 0);
+  assert.ok(!retrieveSegmentSpec(gapStore2, 'TRN'), 'disabled fill must not add KB records');
+
+  // failing endpoint: graceful failure, KB untouched
+  const r4 = await ensureKbCoverage(gapStore2, parsedTrn.segments, { endpoint: 'http://127.0.0.1:9/v1/chat/completions', model: 'x', timeoutMs: 1500 }, quiet);
+  assert.strictEqual(r4.disabled, false);
+  assert.strictEqual(r4.failed.length, 1, 'failure must be reported');
+  assert.strictEqual(r4.failed[0].segId, 'TRN');
+  assert.ok(!retrieveSegmentSpec(gapStore2, 'TRN'), 'failed fill must not add KB records');
+
+  // upsert replaces in place (the merge path for a known segment missing positions)
+  const before = fillStore.count();
+  fillStore.upsert({
+    claimId: 'kb',
+    type: 'kb',
+    segId: 'TRN',
+    segIndex: 0,
+    text: TRN_CHUNK + '\nEL 06 TRN06 Extra :: Later addition.',
+    meta: { name: 'Transmission Information', source: 'ai' },
+  });
+  assert.strictEqual(fillStore.count(), before, 'upsert replaces, does not add');
+  assert.ok(fillStore.get('kb', 'kb', 'TRN', 0)!.text.includes('TRN06'), 'upserted text is in place');
+
+  aiServer.close();
+  fs.rmSync(fillStoreFile, { force: true });
+  fs.rmSync(gapStore2File, { force: true });
+  console.log('ok 9 - AI KB fill (gap detect, mock AI, validate, upsert, idempotent, fail-soft)');
 
   console.log('\nAll smoke tests passed.');
 }

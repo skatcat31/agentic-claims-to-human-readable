@@ -184,7 +184,17 @@
         "properties": {
           "claimId": { "type": "string" },
           "meta": { "$ref": "#/components/schemas/ClaimMeta" },
-          "url": { "type": "string", "description": "Metadata endpoint for the new claim" }
+          "url": { "type": "string", "description": "Metadata endpoint for the new claim" },
+          "kb": {
+            "type": "object",
+            "description": "Knowledge-base fill: 837 field definitions missing from the KB are fetched from the AI endpoint at ingest time (only when AI_ENDPOINT is configured; otherwise disabled=true). No claim data is sent to the AI endpoint.",
+            "properties": {
+              "disabled": { "type": "boolean", "description": "True when no AI endpoint is configured" },
+              "filled": { "type": "array", "items": { "type": "object", "properties": { "segId": { "type": "string" }, "positions": { "type": "array", "items": { "type": "integer" }, "description": "1-based element positions now defined" } }, "required": [ "segId", "positions" ] } },
+              "failed": { "type": "array", "items": { "type": "object", "properties": { "segId": { "type": "string" }, "error": { "type": "string" } }, "required": [ "segId", "error" ] } }
+            },
+            "required": [ "disabled", "filled", "failed" ]
+          }
         },
         "required": [ "claimId", "meta", "url" ]
       },

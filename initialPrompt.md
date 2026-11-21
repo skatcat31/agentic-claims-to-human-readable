@@ -16,3 +16,4 @@ follow up prompts:
 - add a new method to retreive the raw claim
 - generate an open api spec
 - add a new method to generate a claim summary, make it hipaa compliant
+- future proofing: add a tie in for the ingestion where a call can be made to an AI endpoint in case a claim field is unrecogonized so that the AI can go grab the x12 definitions for missing claim fields and add them to the knowledge base

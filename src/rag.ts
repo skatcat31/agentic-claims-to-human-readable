@@ -49,8 +49,10 @@ export function retrieveSegmentSpec(store: VectorStore, segId: string): SpecHit 
     const spec = parseKbChunk(hit.text);
     if (spec && spec.segId === segId) return { spec, score: hit.score };
   }
-  const fallback = hits.length ? parseKbChunk(hits[0].text) : null;
-  return fallback ? { spec: fallback, score: hits[0].score } : null;
+  // A similar-but-different segment (e.g. N8 vs N9) must never stand in for
+  // this one: "not in the KB" beats "wrong definition" (a gap is something
+  // the AI KB fill can then correct, a mislabel is not).
+  return null;
 }
 
 /**

@@ -47,6 +47,44 @@ compiler (dev dependency) are required.
    labeled claim payload, and a small React app into a single HTML file
    under `output/`.
 
+## AI knowledge-base fill (optional)
+
+The built-in KB covers 39 common 837 segments. When a claim uses a segment
+(or an element position) the KB does not define, ingestion can ask a
+configurable AI endpoint to look up the official X12 definitions and add
+them to the knowledge base — future-proofing against rare or unknown
+fields (`src/aidefinitions.ts`).
+
+- **Off by default.** Set `AI_ENDPOINT` to enable. Any OpenAI-compatible
+  `chat/completions` endpoint works (OpenAI, Ollama, vLLM, a LiteLLM
+  proxy, …).
+
+| Variable        | Default       | Purpose                                      |
+|-----------------|---------------|----------------------------------------------|
+| `AI_ENDPOINT`   | _(unset)_     | Full URL of the chat-completions endpoint    |
+| `AI_API_KEY`    | _(empty)_     | Bearer token, when the endpoint needs one    |
+| `AI_MODEL`      | `gpt-4o-mini` | Model to use                                 |
+| `AI_TIMEOUT_MS` | `30000`       | Per-segment request timeout                  |
+
+**How it works:** at ingest, every segment id and element position in the
+claim is checked against the vector-DB KB (`findKbGaps`). For each gap, a
+prompt asks the AI for the X12 definitions of the missing positions in the
+exact KB chunk format (`SEG … / EL NN …`); the response is validated with
+the same `parseKbChunk()` as the built-in KB (segment id must match and
+every missing position must be defined) and upserted into the KB as a `kb`
+record with `meta.source = 'ai'`. Exports/summaries then label those
+fields via the normal RAG path, and re-ingesting the same claim never
+re-fetches (gaps are re-checked first).
+
+**Never blocks ingestion:** an unset endpoint, a failed call, or an
+unvalidated response is logged and the claim is ingested as usual (unknown
+fields keep the `Element N` fallback label). The fill result is returned
+in the ingest response (`kb.filled` / `kb.failed`) and printed by the CLI.
+
+**HIPAA:** the prompt contains only the segment id, 1-based element
+positions, the interchange standard version (ST03) and existing KB
+definitions — never claim data values. No PHI is sent to the AI endpoint.
+
 ## Quick start
 
 ```bash
@@ -410,7 +448,9 @@ src/embedding.ts      hashing-trick sparse embeddings + cosine similarity
 src/vectorstore.ts    file-backed vector DB (JSON) with top-k search
 src/parse837.ts       X12 837 parser (segments, elements, stable keys)
 src/knowledge837.ts   837 field-definition knowledge base (39 segments)
+src/aidefinitions.ts  AI KB gap-fill (optional; fetches missing X12 definitions)
 src/rag.ts            retrieval + labeling pipeline
+src/summary.ts        plain-English claim summary (full + de-identified)
 src/generate.ts       self-contained HTML generator (React baked in)
 src/vendor.ts         one-time download of the React UMD bundles
 src/server.ts         HTTP API + index page

@@ -74,13 +74,21 @@ async function main(): Promise<void> {
       headers: { 'Content-Type': 'text/plain' },
       body: text,
     });
-    const j = (await r.json()) as { error?: string; claimId?: string; meta?: { segmentCount: number } };
+    const j = (await r.json()) as {
+      error?: string;
+      claimId?: string;
+      meta?: { segmentCount: number };
+      kb?: { filled?: { segId: string; positions: number[] }[]; failed?: { segId: string; error: string }[] };
+    };
     if (!r.ok || !j.claimId) {
       console.error('Error:', j.error ?? 'unknown');
       process.exitCode = 1;
       return;
     }
     console.log('Ingested ' + j.claimId + ' (' + (j.meta?.segmentCount ?? '?') + ' segments)');
+    for (const f of j.kb?.filled ?? [])
+      console.log('KB fill: ' + f.segId + ' (positions ' + f.positions.join(', ') + ') fetched from the AI endpoint');
+    for (const f of j.kb?.failed ?? []) console.error('KB fill: ' + f.segId + ' failed: ' + f.error);
     console.log('Export:  node dist/cli.js export ' + j.claimId);
     return;
   }

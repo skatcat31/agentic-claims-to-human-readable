@@ -7,7 +7,10 @@
  *
  * API:
  *   GET  /                     index page (list of claims + ingest form)
- *   POST /api/claims           ingest a claim (raw text or JSON {claim})
+ *   POST /api/claims           ingest a claim (raw text or JSON {claim});
+ *                              missing 837 KB definitions are auto-filled
+ *                              from the AI endpoint when AI_ENDPOINT is set
+ *                              (src/aidefinitions.ts)
  *   GET  /api/claims           list ingested claims
  *   GET  /api/claims/:id       claim metadata
  *   GET  /api/claims/:id/raw   reconstructed raw 837 text (from the vector DB)
@@ -27,6 +30,7 @@ import { VectorStore } from './vectorstore';
 import { parse837, ParsedSegment } from './parse837';
 import { kbChunks } from './knowledge837';
 import { labelClaim, LabelStats } from './rag';
+import { aiConfigFromEnv, ensureKbCoverage, KbFillResult } from './aidefinitions';
 import { buildClaimSummary } from './summary';
 import { buildHtml } from './generate';
 import { ensureVendor } from './vendor';
@@ -56,6 +60,8 @@ export interface ExportResult {
 interface IngestResult {
   claimId: string;
   meta: ClaimMeta;
+  /** Knowledge-base fill result (AI-fetched definitions for missing fields). */
+  kb: KbFillResult;
 }
 
 export interface ClaimListItem {
@@ -99,7 +105,7 @@ function seedKnowledgeBase(): number {
 }
 
 /** Ingest a raw 837 claim into the vector DB. */
-function ingestClaim(rawText: string): IngestResult {
+async function ingestClaim(rawText: string): Promise<IngestResult> {
   const parsed = parse837(rawText);
   const claimId = newClaimId();
 
@@ -130,8 +136,13 @@ function ingestClaim(rawText: string): IngestResult {
     text: 'claim metadata ' + claimId,
     meta,
   });
+
+  // Future-proofing: fill KB gaps (unknown segments / element positions)
+  // from the AI endpoint when configured. Never blocks ingestion.
+  const kb = await ensureKbCoverage(store, parsed.segments, aiConfigFromEnv());
+
   store.save();
-  return { claimId, meta };
+  return { claimId, meta, kb };
 }
 
 /**
@@ -354,7 +365,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       }
       let result: IngestResult;
       try {
-        result = ingestClaim(claimText);
+        result = await ingestClaim(claimText);
       } catch (err) {
         sendJson(res, 400, { error: 'Parse failed: ' + (err instanceof Error ? err.message : String(err)) });
         return;
@@ -509,6 +520,13 @@ export async function boot(): Promise<void> {
         ')'
     );
     console.log('  exports:   ' + OUTPUT_DIR);
+    const aiCfg = aiConfigFromEnv();
+    console.log(
+      '  AI KB fill: ' +
+        (aiCfg
+          ? 'enabled (' + aiCfg.model + ' @ ' + aiCfg.endpoint + ')'
+          : 'disabled (set AI_ENDPOINT to auto-fill missing 837 field definitions)')
+    );
   });
 }
 
