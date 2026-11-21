@@ -59,12 +59,13 @@ fields (`src/aidefinitions.ts`).
   `chat/completions` endpoint works (OpenAI, Ollama, vLLM, a LiteLLM
   proxy, …).
 
-| Variable        | Default       | Purpose                                      |
-|-----------------|---------------|----------------------------------------------|
-| `AI_ENDPOINT`   | _(unset)_     | Full URL of the chat-completions endpoint    |
-| `AI_API_KEY`    | _(empty)_     | Bearer token, when the endpoint needs one    |
-| `AI_MODEL`      | `gpt-4o-mini` | Model to use                                 |
-| `AI_TIMEOUT_MS` | `30000`       | Per-segment request timeout                  |
+| Variable           | Default       | Purpose                                      |
+|--------------------|---------------|----------------------------------------------|
+| `AI_ENDPOINT`      | _(unset)_     | Full URL of the chat-completions endpoint    |
+| `AI_API_KEY`       | _(empty)_     | Bearer token, when the endpoint needs one    |
+| `AI_MODEL`         | `gpt-4o-mini` | Model to use                                 |
+| `AI_TIMEOUT_MS`    | `30000`       | Per-segment request timeout                  |
+| `AI_ENABLE_THINKING` | `1`          | `0` asks vLLM/Qwen3-style deployments to answer without a chain-of-thought trace (sends `chat_template_kwargs`); ignored by endpoints that do not support it |
 
 **How it works:** at ingest, every segment id and element position in the
 claim is checked against the vector-DB KB (`findKbGaps`). For each gap, a
@@ -75,6 +76,23 @@ every missing position must be defined) and upserted into the KB as a `kb`
 record with `meta.source = 'ai'`. Exports/summaries then label those
 fields via the normal RAG path, and re-ingesting the same claim never
 re-fetches (gaps are re-checked first).
+
+**Reasoning-model friendly:** the request is *streamed* (SSE), so models
+that spend minutes "thinking" before answering keep the connection alive
+instead of being cut by a proxy idle/read timeout; endpoints that ignore
+`stream` and answer with plain JSON are handled too. Responses that
+inline the chain-of-thought in `content` are handled by taking the last
+SEG/EL block after the closing answer-separator tag. A 30 KB content cap
+stops degenerate looping generations from growing unbounded — such
+responses fail fast and cleanly instead of hanging.
+
+**Choosing a model / thinking mode (observed with a 27B-class reasoning
+model on vLLM):** with chain-of-thought enabled the definitions were
+accurate but slow (seconds to minutes per segment) and occasionally
+degenerated into loops; with thinking disabled (`AI_ENABLE_THINKING=0`)
+answers came back in seconds but element names were less reliable
+(hallucinations observed). Prefer thinking enabled for accuracy; if a
+fill fails, the gap is simply retried on the next ingest.
 
 **Never blocks ingestion:** an unset endpoint, a failed call, or an
 unvalidated response is logged and the claim is ingested as usual (unknown

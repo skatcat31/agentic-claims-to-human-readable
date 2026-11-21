@@ -15,7 +15,7 @@ import { parse837, ParsedSegment } from '../src/parse837';
 import { kbChunks, parseKbChunk } from '../src/knowledge837';
 import { retrieveSegmentSpec, labelClaim } from '../src/rag';
 import { buildClaimSummary } from '../src/summary';
-import { findKbGaps, ensureKbCoverage } from '../src/aidefinitions';
+import { findKbGaps, ensureKbCoverage, extractKbChunk } from '../src/aidefinitions';
 import { buildHtml } from '../src/generate';
 import { ensureVendor } from '../src/vendor';
 import { SAMPLES_DIR, VENDOR_DIR, OPENAPI_FILE } from '../src/paths';
@@ -199,8 +199,13 @@ async function main(): Promise<void> {
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       aiCalls.push(body);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: { content: 'Here you go:\n```\n' + TRN_CHUNK + '\n```' } }] }));
+      const aiContent = 'Here you go:\n```\n' + TRN_CHUNK + '\n```';
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: aiContent.slice(0, 40) } }] }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: aiContent.slice(40) } }] }) + '\n\n');
+      res.write('data: [DONE]\n\n');
+      res.end();
     });
   });
   await new Promise<void>((resolve) => aiServer.listen(0, '127.0.0.1', () => resolve()));
@@ -233,6 +238,26 @@ async function main(): Promise<void> {
   assert.ok(promptBody.includes('TRN') && promptBody.includes('TRN05'), 'prompt asks for the TRN positions');
   assert.ok(promptBody.includes('005010X222'), 'prompt carries the standard version (ST03)');
   assert.ok(!/DOE|JOHN|1234567890|450\.00/.test(promptBody), 'prompt must not contain claim values (no PHI)');
+
+  // extractKbChunk must survive a reasoning-model response: a chain of
+  // thought that echoes the format, then the closing answer-separator tag,
+  // then the real chunk (wrapped in a code fence)
+  const THINK_END = String.fromCharCode(92) + 'r/ending';
+  const reasoningTrace =
+    'Let me recall the requested format:\n' +
+    'SEG TRN <Segment Name>\n' +
+    'EL 01 TRN01 <Element Name> :: <one-sentence definition>\n' +
+    'That is the template. Composing the answer now:\n' +
+    THINK_END + '\n' +
+    '```text\n' +
+    TRN_CHUNK +
+    '\n```';
+  const traced = extractKbChunk(reasoningTrace);
+  assert.ok(traced !== null, 'chunk must be found in a reasoning-trace response');
+  assert.ok(traced.startsWith('SEG TRN Transmission Information'), 'extraction must take the final answer, not the echoed template');
+  const tracedSpec = parseKbChunk(traced);
+  assert.ok(tracedSpec, 'traced chunk must parse');
+  assert.strictEqual(Object.keys(tracedSpec.elements).length, 5, 'all five TRN positions parsed from the final answer');
 
   const trnSpec = retrieveSegmentSpec(fillStore, 'TRN');
   assert.ok(trnSpec && trnSpec.spec.segId === 'TRN', 'TRN spec now retrievable from the KB');
@@ -272,6 +297,39 @@ async function main(): Promise<void> {
   assert.strictEqual(r4.failed[0].segId, 'TRN');
   assert.ok(!retrieveSegmentSpec(gapStore2, 'TRN'), 'failed fill must not add KB records');
 
+  // disableThinking must add the vLLM/Qwen3 chat_template_kwargs body field
+  const r5 = await ensureKbCoverage(gapStore2, parsedTrn.segments, { ...aiCfg, disableThinking: true }, quiet);
+  assert.strictEqual(r5.filled.length, 1, 'fill succeeds with disableThinking');
+  const body2 = JSON.parse(aiCalls[aiCalls.length - 1]) as { chat_template_kwargs?: { enable_thinking?: boolean } };
+  assert.strictEqual(body2.chat_template_kwargs?.enable_thinking, false, 'disableThinking sends chat_template_kwargs.enable_thinking=false');
+
+  // a degenerate looping response (far beyond the content cap) must fail fast, not hang
+  const loopServer = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    let i = 0;
+    const t = setInterval(() => {
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'N1, N2, N3, N4, N5, N6, N7, N8, N9, N1, N2, N3, N4, N5, N6, N7, N8, N9, ' } }] }) + '\n\n');
+      if (++i >= 700) {
+        res.write('data: [DONE]\n\n');
+        res.end();
+        clearInterval(t);
+      }
+    }, 5);
+  });
+  await new Promise<void>((resolve) => loopServer.listen(0, '127.0.0.1', () => resolve()));
+  const loopPort = (loopServer.address() as { port: number }).port;
+  const gapStore3File = path.join(os.tmpdir(), 'smoke-kb-fill3-' + Date.now() + '.json');
+  const gapStore3 = new VectorStore(gapStore3File);
+  await gapStore3.load();
+  for (const c of kbChunks())
+    gapStore3.add({ claimId: 'kb', type: 'kb', segId: c.segId, segIndex: 0, text: c.text, meta: { name: c.name } });
+  const r6 = await ensureKbCoverage(gapStore3, parsedTrn.segments, { endpoint: 'http://127.0.0.1:' + loopPort + '/v1/chat/completions', model: 'loop', timeoutMs: 30000 }, quiet);
+  assert.strictEqual(r6.failed.length, 1, 'looping response must be reported as a failure');
+  assert.strictEqual(r6.filled.length, 0);
+  assert.ok(!retrieveSegmentSpec(gapStore3, 'TRN'), 'looping response must not add KB records');
+  loopServer.close();
+
   // upsert replaces in place (the merge path for a known segment missing positions)
   const before = fillStore.count();
   fillStore.upsert({
@@ -288,7 +346,8 @@ async function main(): Promise<void> {
   aiServer.close();
   fs.rmSync(fillStoreFile, { force: true });
   fs.rmSync(gapStore2File, { force: true });
-  console.log('ok 9 - AI KB fill (gap detect, mock AI, validate, upsert, idempotent, fail-soft)');
+  fs.rmSync(gapStore3File, { force: true });
+  console.log('ok 9 - AI KB fill (gap detect, mock AI, validate, upsert, idempotent, fail-soft, disableThinking, content cap)');
 
   console.log('\nAll smoke tests passed.');
 }

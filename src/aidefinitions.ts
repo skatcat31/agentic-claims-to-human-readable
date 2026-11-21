@@ -31,6 +31,13 @@ export interface AIConfig {
   apiKey?: string;
   model: string;
   timeoutMs: number;
+  /**
+   * Ask the deployment to suppress chain-of-thought (vLLM/Qwen3-style:
+   * sends `chat_template_kwargs: { enable_thinking: false }`). Useful when
+   * the reasoning trace is slow or the model loops while thinking. Ignored
+   * by endpoints that do not support the field.
+   */
+  disableThinking?: boolean;
 }
 
 /** Read the AI config from the environment; null when AI_ENDPOINT is unset. */
@@ -42,6 +49,9 @@ export function aiConfigFromEnv(env: NodeJS.ProcessEnv = process.env): AIConfig 
     apiKey: (env.AI_API_KEY ?? '').trim() || undefined,
     model: (env.AI_MODEL ?? '').trim() || 'gpt-4o-mini',
     timeoutMs: parseInt((env.AI_TIMEOUT_MS ?? '').trim(), 10) || 30000,
+    // AI_ENABLE_THINKING=0 (or false/no/off) asks vLLM/Qwen3-style
+    // deployments to answer without a chain-of-thought trace.
+    disableThinking: ['0', 'false', 'no', 'off'].includes((env.AI_ENABLE_THINKING ?? '').trim().toLowerCase()),
   };
 }
 
@@ -137,7 +147,18 @@ export function kbFillPrompt(gap: KbGap, standard: string): string {
   return lines.join('\n');
 }
 
-/** Call the AI endpoint (OpenAI-compatible chat completions). */
+/** KB-definition answers are always small; beyond this the response is almost certainly a degenerate reasoning loop. */
+const KB_CONTENT_CAP = 30000;
+
+/**
+ * Call the AI endpoint (OpenAI-compatible chat completions). The request
+ * is STREAMED: reasoning models can spend minutes thinking before the
+ * final answer is emitted, and a proxy with an idle/read timeout will cut
+ * a silent connection. With `stream: true` tokens (including any inlined
+ * reasoning trace) flow continuously, keeping the connection alive.
+ * Endpoints that ignore `stream` and answer with plain JSON are handled
+ * by the content-type fallback below.
+ */
 async function chatCompletion(cfg: AIConfig, prompt: string): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
@@ -150,14 +171,45 @@ async function chatCompletion(cfg: AIConfig, prompt: string): Promise<string> {
       body: JSON.stringify({
         model: cfg.model,
         temperature: 0,
+        stream: true,
         messages: [{ role: 'user', content: prompt }],
+        ...(cfg.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {}),
       }),
       signal: controller.signal,
     });
     if (!res.ok) throw new Error('AI endpoint returned HTTP ' + res.status);
-    const j = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const first = j.choices && j.choices.length ? j.choices[0] : undefined;
-    const content = first && first.message ? first.message.content : undefined;
+    if ((res.headers.get('content-type') ?? '').includes('application/json')) {
+      const j = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      const first = j.choices && j.choices.length ? j.choices[0] : undefined;
+      const content = first && first.message ? first.message.content : undefined;
+      if (!content) throw new Error('AI response contained no message content');
+      return content;
+    }
+    const reader = res.body ? res.body.getReader() : null;
+    if (!reader) throw new Error('AI endpoint returned an unreadable response body');
+    const decoder = new TextDecoder();
+    let buf = '';
+    let content = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const payload = t.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        try {
+          const j = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+          const delta = j.choices && j.choices.length ? j.choices[0].delta : undefined;
+          if (delta && typeof delta.content === 'string' && content.length < KB_CONTENT_CAP) content += delta.content;
+        } catch {
+          // Ignore incomplete or non-JSON SSE lines.
+        }
+      }
+    }
     if (!content) throw new Error('AI response contained no message content');
     return content;
   } finally {
@@ -165,16 +217,41 @@ async function chatCompletion(cfg: AIConfig, prompt: string): Promise<string> {
   }
 }
 
-/** Pull the SEG/EL chunk out of a model response (tolerates code fences). */
+/**
+ * Pull the SEG/EL chunk out of a model response. Tolerates markdown code
+ * fences and reasoning-model traces: some deployments inline the chain of
+ * thought in `content`, separated from the final answer by a closing
+ * answer-separator tag, and the reasoning often echoes the requested
+ * format. The answer is therefore the LAST part (splitting on that tag)
+ * that still contains a SEG/EL block - and within it, the LAST contiguous
+ * SEG/EL block.
+ */
 export function extractKbChunk(raw: string): string | null {
-  let text = raw.trim();
+  const parts = raw
+    .trim()
+    .split(THINK_END)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const chunk = chunkFromText(parts[i]);
+    if (chunk) return chunk;
+  }
+  return null;
+}
+
+/** Closing answer-separator tag emitted by reasoning deployments (built from char codes to keep escapes explicit). */
+const THINK_END = String.fromCharCode(92) + 'r/ending';
+
+/** Extract the last contiguous SEG/EL block from one piece of text. */
+function chunkFromText(text: string): string | null {
   const fence = text.match(/```[\w-]*\s*\n([\s\S]*?)```/);
   if (fence) text = fence[1].trim();
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
-  const start = lines.findIndex((l) => /^SEG\s/.test(l));
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) if (/^SEG\s/.test(lines[i])) start = i;
   if (start < 0) return null;
   let end = lines.length - 1;
   while (end > start && !/^EL\s/.test(lines[end])) end--;
